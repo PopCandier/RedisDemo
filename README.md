@@ -256,3 +256,148 @@ set key value [expiration EX seconds|PX milliseconds][NX|XX]
 set lock 1 EX 10 NX
 ```
 
+(整数)值递增，结果累加一
+
+```
+incr pop
+```
+
+(整数)值递增，结果累加一个指定的值，这个例子中本体加上200
+
+```
+incrby pop 200
+```
+
+(整数)值递增，结果减一
+
+```
+decr pop
+```
+
+(整数)值递增，结果减去一个指定的值，这个例子中本体加上200
+
+```
+decr pop 200
+```
+
+![1572918470223](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572918470223.png)
+
+如图所示，他会返回计算后的结果
+
+浮点数增加到以后的数值
+
+```
+set f 2.6
+incrbyfloat f 7.3
+```
+
+获取多个值
+
+```
+mget pop pop1
+```
+
+获取值的长度
+
+```
+strlen pop
+```
+
+字符串追加内容
+
+```
+append pop good
+```
+
+获取指定范围的字符
+
+```
+getrange pop 0 8
+```
+
+
+![1572922727070](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572922727070.png)
+
+#### Redis 的数据模型
+
+set hello word 为例，因为 Redis 是 KV 的数据库，它是通过 hashtable 实现的（我 
+
+们把这个叫做外层的哈希）。所以每个键值对都会有一个 dictEntry（源码位置：dict.h）， 
+
+里面指向了 key 和 value 的指针。next 指向下一个 dictEntry。
+
+```c
+/* Unused arguments generate annoying warnings... */
+#define DICT_NOTUSED(V) ((void) V)
+
+typedef struct dictEntry {
+    void *key; /* key关键字的位置，在上面的例子，就是 hello*/
+    union {
+        void *val;
+        uint64_t u64; /* value 的位置，也就是 world的存储位置*/
+        int64_t s64;
+        double d;
+    } v;
+    struct dictEntry *next; /* 指向下一个 dictEntry*/
+} dictEntry;
+```
+
+![1572925609047](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572925609047.png)
+
+在这个数据结构中，key的数据格式为SDS，SDS的含义之后会解释，本质上还是一个字符串，只不过他没有使用C中的字符数组，而是直接存储在自定义的SDS中。
+
+value与key有所不同，他并不是直接存储字符串，而是直接存储在`redisObject`，事实上五种常用的数据类型中的任意一种
+
+```
+String、Hash、Set、List、Zset
+```
+
+都可以存储在`redisObject`中，而`redisObject`算是一种兼容的解决方案，通过它来存储真正的value。
+
+`redisObject` 定义在 `src/server.h` 文件中。
+
+```c
+typedef struct redisObject {
+    unsigned type:4;/* 对象的类型，包括：OBJ_STRING、OBJ_LIST、OBJ_HASH、OBJ_SET、OBJ_ZSET */
+    unsigned encoding:4;/* 具体的数据结构 类似 object encoding xxx*/
+    unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
+                            * LFU data (least significant 8 bits frequency
+                            * and most significant 16 bits access time). 
+                            /* 24 位，对象最后一次被命令程序访问的时间，与内存回收有关 */
+                            */
+    int refcount;/* 引用计数。当 refcount 为 0 的时候，表示该对象已经不被任何对象引用，则可以进行垃圾回收了 */
+    void *ptr;/* 指向对象实际的数据结构 */
+} robj;
+```
+
+你可以使用`type`命令来查看对外的类型
+
+```
+type pop
+```
+
+![1572939714351](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572939714351.png)
+
+之前说到，redis是按照KV存储，KV的数据格式是在C中定义的dictEntry，dictEntry的key字段是直接保存了我们定义的key，但是value却不是直接保存下来，而是用redisObject记录下来，redisObject里面又指向了对象实际的数据结果，也就是ptr字段。
+
+![1572940238355](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572940238355.png)
+
+![1572940465652](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572940465652.png)
+
+字符串类型的内部编码有三种
+
+* int （四个字节），long（八个字节 2^63-1）
+* embstr，代表emstr格式的SDS（Simple Dynamic String 简单动态字符串），存储小于44个字节的字符串
+* raw，存储大于44个字节的字符串（3.2版本之前是39个字节）
+
+```c
+/* object.c */
+/* Create a string object with EMBSTR encoding if it is smaller than
+ * OBJ_ENCODING_EMBSTR_SIZE_LIMIT, otherwise the RAW encoding is
+ * used.
+ *
+ * The current limit of 44 is chosen so that the biggest string object
+ * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
+#define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
+```
+
