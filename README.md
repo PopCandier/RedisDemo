@@ -280,7 +280,7 @@ decr pop
 decr pop 200
 ```
 
-![1572918470223](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572918470223.png)
+![1572918470223](./img/1572918470223.png)
 
 如图所示，他会返回计算后的结果
 
@@ -316,7 +316,7 @@ getrange pop 0 8
 ```
 
 
-![1572922727070](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572922727070.png)
+![1572922727070](./img/1572922727070.png)
 
 #### Redis 的数据模型
 
@@ -342,7 +342,7 @@ typedef struct dictEntry {
 } dictEntry;
 ```
 
-![1572925609047](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572925609047.png)
+![1572925609047](./img/1572925609047.png)
 
 在这个数据结构中，key的数据格式为SDS，SDS的含义之后会解释，本质上还是一个字符串，只不过他没有使用C中的字符数组，而是直接存储在自定义的SDS中。
 
@@ -376,13 +376,13 @@ typedef struct redisObject {
 type pop
 ```
 
-![1572939714351](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572939714351.png)
+![1572939714351](./img/1572939714351.png)
 
 之前说到，redis是按照KV存储，KV的数据格式是在C中定义的dictEntry，dictEntry的key字段是直接保存了我们定义的key，但是value却不是直接保存下来，而是用redisObject记录下来，redisObject里面又指向了对象实际的数据结果，也就是ptr字段。
 
-![1572940238355](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572940238355.png)
+![1572940238355](./img/1572940238355.png)
 
-![1572940465652](C:\Users\范凌轩\AppData\Roaming\Typora\typora-user-images\1572940465652.png)
+![1572940465652](./img/1572940465652.png)
 
 字符串类型的内部编码有三种
 
@@ -400,4 +400,95 @@ type pop
  * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
 #define OBJ_ENCODING_EMBSTR_SIZE_LIMIT 44
 ```
+
+> 什么是SDS？
+
+SDS ，称为 （Simple Dynamic String 简单动态字符串），这个也是`redis`自己定义的用于存储不同长度的字符串。
+
+在 3.2 以后的版本中，SDS 又有多种结构（sds.h）：sdshdr5、sdshdr8、sdshdr16、sdshdr32、sdshdr64，用于存储不同的长度的字符串，分别代表 2^5=32byte， 2^8=256byte，2^16=65536byte=64KB，2^32byte=4GB。
+
+```c
+/* sds.h*/
+
+typedef char *sds;
+
+/* Note: sdshdr5 is never used, we just access the flags byte directly.
+ * However is here to document the layout of type 5 SDS strings. */
+struct __attribute__ ((__packed__)) sdshdr5 {
+    unsigned char flags; /* 3 lsb of type, and 5 msb of string length */
+    char buf[];
+};
+struct __attribute__ ((__packed__)) sdshdr8 {
+    uint8_t len; /* 当前字符数组的长度 */
+    uint8_t alloc; /* 当前字符数组总共分配的内存大小 */
+    unsigned char flags; /* 当前字符数组的属性，用来标识这个是sdshdr8
+    还是 sdshdr16 等*/
+    char buf[]; /*字符串真正的值*/
+};
+struct __attribute__ ((__packed__)) sdshdr16 {
+    uint16_t len; /* used */
+    uint16_t alloc; /* excluding the header and null terminator */
+    unsigned char flags; /* 3 lsb of type, 5 unused bits */
+    char buf[];
+};
+struct __attribute__ ((__packed__)) sdshdr32 {
+    uint32_t len; /* used */
+    uint32_t alloc; /* excluding the header and null terminator */
+    unsigned char flags; /* 3 lsb of type, 5 unused bits */
+    char buf[];
+};
+struct __attribute__ ((__packed__)) sdshdr64 {
+    uint64_t len; /* used */
+    uint64_t alloc; /* excluding the header and null terminator */
+    unsigned char flags; /* 3 lsb of type, 5 unused bits */
+    char buf[];
+};
+
+```
+
+> 为什么 Redis 要用 SDS 实现字符串 ？
+
+在C语言中，是没有字符串类型的，所以只能用字符数组char[]实现
+
+* 使用字符数组必须先给目标变量分配足够的空间，否则可能会溢出
+* 如果要获取字符长度，必须遍历字符数组，时间复杂度是O(n)
+* C字符串长度的变更会对字符数组做内存重分配。
+* C中，通过从字符串开始到结尾以 '\0'来标记字符串的结束，因此不能保存图片，音频，视频，压缩文件等二进制(bytes)保存的内容，因为'\0'的添加会损坏这些文件。
+
+Redis引入的SDS的当然是为了解决这些问题
+
+* SDS之前定义了5种不同容量结构，不用担心内存溢出的问题，如果需要会对SDS进行扩容
+
+* 由于SDS中定义记录当前字符串长度的字段，所以时间复杂度是O(n)
+
+  ```c
+  struct __attribute__ ((__packed__)) sdshdr8 {
+      uint8_t len; /* 当前字符数组的长度 */
+      uint8_t alloc; /* 当前字符数组总共分配的内存大小 */
+      unsigned char flags; /* 当前字符数组的属性，用来标识这个是sdshdr8
+      还是 sdshdr16 等*/
+      char buf[]; /*字符串真正的值*/
+  };
+  ```
+
+* 通过 “空间预分配” (sdsMakeRoomFor)和 “惰性空间释放”，防止多次重分配内存
+
+* 判断结束的标志是`len`属性，所以不用考虑结尾‘\0’带来的问题，当然原本C的原始保存格式也可以同样适用。	
+
+| C字符串                                      | SDS                                   |
+| -------------------------------------------- | ------------------------------------- |
+| 获取字符串长度的时间复杂度是O(n)             | 获取字符串长度的时间复杂度是O(1)      |
+| API是不安全的，可能会造成缓冲区溢出          | API是安全的，不会造成溢出，必要时扩容 |
+| 修改字符串长度N次必然需要执行N次内存重新分配 | 修改字符串长度的N次，最多执行N次分配  |
+| 只能保存文本数据                             | 可以保存文本数据，和二进制数据        |
+| 可以使用所有<string.h>库中的函数             | 可以使用部分<string.h>库中的函数      |
+
+> embstr 和 raw 的区别？
+
+* 我们知道在3.2版本之后，embstr由原来存储39个bytes变为了44个，当超过44就会转化为raw，能存储的长度是他们第一个区别。
+
+* embstr的使用是只分配一次内存空间，在上面的图我们看到了redisObject的*ptr字段是指向了下一个SDS，这里我猜想的连续可能是44个字节加上原本reidsObject所占字节数正好可以是一个完整的内存，所以他们连续，例如正好占有64个字节之类的。对于raw来说，因为大于44个字节，所以导致，原本分配一次的工作需要分配两次，分别为RedisObject和SDS分配。
+
+* 也是embstr是因为他好处是创建一次空间，所以他删除的时候，相比raw少释放一次sds的空间，应为redisObject和sds不连续在raw中。又因为他们是连续的，所以寻找方便。
+* 当然坏处也有，embstr因为是连续的，所以你希望增加字符串长度的时候，需要重新分配内存，这也意味着redisObject和SDS也需要重新分配空间，同时，这个分配方式也会让embstr类型转化为raw，因此redis中的embstr是只读，如果你对他进行修改，无论修改的值是否超过了44个字节，都会转化为raw。
 
