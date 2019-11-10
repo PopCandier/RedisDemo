@@ -12,7 +12,7 @@
 
 [Redis中的Set](./SET.md)
 
-[Redis中的ZSet](./ZSet.md)
+[Redis中的ZSet](./ZSET.md)
 
 
 
