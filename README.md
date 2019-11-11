@@ -69,5 +69,5 @@
 
 
 
-[Redis的一个高级特性](./SPECIALITY.md)
+[Redis的一些高级特性](./SPECIALITY.md)
 
