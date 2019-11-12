@@ -306,3 +306,31 @@ EVAL.
 
 > 自乘案例
 
+Redis 有 incrby 这样的自增命令，但是没有自乘，比如乘以 3，乘以 5。 
+
+我们可以写一个自乘的运算，让它乘以后面的参数：
+
+```lua
+local curVal = redis.call("get", KEYS[1]) 
+	if curVal == false then curVal = 0 
+	else curVal = tonumber(curVal) end
+	curVal = curVal * tonumber(ARGV[1]) 
+redis.call("set", KEYS[1], curVal)
+return curVal
+```
+
+把这个脚本变成单行，语句之间使用分号隔开 
+
+```lua
+local curVal = redis.call("get", KEYS[1]); if curVal == false then curVal = 0 else curVal = tonumber(curVal) end; curVal = curVal * tonumber(ARGV[1]); redis.call("set", KEYS[1], curVal); return curVal
+```
+
+script load '命令'
+
+```
+127.0.0.1:6379> script load 'local curVal = redis.call("get", KEYS[1]); if curVal == false then curVal = 0 else curVal = tonumber(curVal) end; curVal = curVal * tonumber(ARGV[1]); redis.call("set", KEYS[1], curVal); return curVal'
+"be4f93d8a5379e5e5b768a74e77c8a4eb0434441"
+
+127.0.0.1:6379> set num 2 OK 127.0.0.1:6379> evalsha be4f93d8a5379e5e5b768a74e77c8a4eb0434441 1 num 6 (integer) 12
+```
+
