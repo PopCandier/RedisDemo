@@ -334,3 +334,274 @@ script load '命令'
 127.0.0.1:6379> set num 2 OK 127.0.0.1:6379> evalsha be4f93d8a5379e5e5b768a74e77c8a4eb0434441 1 num 6 (integer) 12
 ```
 
+---
+
+##### Redis为什么这快
+
+* 纯内存
+* 单线程，避免上下文切换
+
+更多解释请翻阅redis原理笔记。
+
+----
+
+#### 内存回收
+
+Redis的所有数据都存储在内存中的，在某些情况下需要对占用内存空间进行回收。内存回收主要分为两类，一类是key过期，一类是内存使用达到上限（max_memory），触发内存淘汰
+
+##### 过期策略
+
+要设置key过期，我们有几种猜想。
+
+> 定时过期（主动淘汰）
+
+每个设置过期时间的key都需要创建一个定时器，达到到期时间就会立即清除。该策略可以立即清除过期数据，对内存很友好，但是会占用大量的CPU资源去处理过期的数据，从而影响缓存的响应时间和吞吐量。
+
+> 惰性过期 （被动淘汰）
+
+只有当访问一个key时，才会判断该key是否过期，过期则清除，该策略是最大化节省CPU资源，但是对内存不是很友好。极端情况下可能会出现大量过期key因为没有再次被访问，而被堆积，占用大量内存。
+
+> 定期过期
+
+```c
+/* server.h*/
+typedef struct redisDb {
+    dict *dict; /* 所有的键值对 */
+    dict *expires; /* 设置了过期时间的键值对 */
+    dict *blocking_keys; /* Keys with clients waiting for data (BLPOP)*/
+    dict *ready_keys; /* Blocked keys that received a PUSH */
+    dict *watched_keys; /* WATCHED keys for MULTI/EXEC CAS */
+    int id; /* Database ID */
+    long long avg_ttl; /* Average TTL, just for stats */
+    list *defrag_later; /* List of key names to attempt to defrag one by one, gradually. */
+} redisDb;
+```
+
+每隔一定时间，会扫描一定数量的数据库的expires字典中一定数量的key，并清除其中已经过期的key。该策略是前两者的一个折中方案。**通过调整定时扫描的时间间隔和每次扫描的限定耗时**，可以在不同情况下使得CPU和内存资源达到最优的平衡效果。
+
+在Redis中同时使用了**惰性过期**和**定时过期**两种过期策略。
+
+当然，这里有一个问题就是，如果我就是设置了很多不过期的值，导致内存满了怎么办？
+
+
+
+#### 淘汰策略
+
+Redis内存淘汰策略，是指当内存使用达到最大内存极限时，需要使用淘汰算法来决定清理掉哪些数据，以保证新数据的存入。
+
+> 最大内存设置。
+
+```properties
+# redis.conf 566行
+# 系统默认是没有设置值，和下面这一行一样，如果你设置了单位是字节
+# maxmemory <bytes>
+maxmemory 1024 
+```
+
+如果不设置maxmemory或者设置为0，64位系统不限制内存，32位系统最多使用3GB内存。
+
+动态修改：
+
+```
+config set maxmemory 2GB
+```
+
+回到之前思考的正题，到达了最大内存怎么办。
+
+```properties
+# reids.conf 571行 内存淘汰策略
+# volatile-lru -> Evict using approximated LRU among the keys with an expire set.
+# allkeys-lru -> Evict any key using approximated LRU.
+# volatile-lfu -> Evict using approximated LFU among the keys with an expire set.
+# allkeys-lfu -> Evict any key using approximated LFU.
+# volatile-random -> Remove a random key among the ones with an expire set.
+# allkeys-random -> Remove a random key, any key.
+# volatile-ttl -> Remove the key with the nearest expire time (minor TTL)
+# noeviction -> Don't evict anything, just return an error on write operations. 不做
+# 任何淘汰动作，响应读操作，但是如果有写操作，将会返回错误信息
+#
+# LRU means Least Recently Used 最近最少使用
+# LFU means Least Frequently Used 最不常使用 4.0版本增加
+# Both LRU, LFU and volatile-ttl are implemented using approximated
+# randomized algorithms. 随机删除
+```
+
+从算法上来看：
+
+LRU means Least Recently Used 最近最少使用。判断最近被使用的时间，目前最远的数据优先被淘汰，意味着很久没使用的数据将会被淘汰。
+
+LFU means Least Frequently Used 最不常使用，最小活跃度，用的少的将会被淘汰。
+
+random，随机删除。
+
+| 策略            | 含义                                                         |
+| --------------- | ------------------------------------------------------------ |
+| volatile-lru    | 根据 LRU 算法删除设置了超时属性（expire）的键，直到腾出足够内存为止。如果没有<br/>可删除的键对象，回退到 noeviction 策略。 |
+| allkeys-lru     | 根据 LRU 算法删除键，不管数据有没有设置超时属性，直到腾出足够内存为止。 |
+| volatile-lfu    | 在带有过期时间的键中选择最不常用的。                         |
+| allkeys-lfu     | 在所有的键中选择最不常用的，不管数据有没有设置超时属性。     |
+| volatile-random | 在带有过期时间的键中随机选择。                               |
+| allkeys-random  | 随机删除所有键，直到腾出足够内存为止。                       |
+| volatile-ttl    | 根据键值对象的 ttl 属性，删除最近将要过期数据。如果没有，回退到 noeviction 策略。 |
+| noeviction      | 默认策略，不会删除任何数据，拒绝所有写入操作并返回客户端错误信息（error）OOM<br/>command not allowed when used memory，此时 Redis 只响应读操作。 |
+
+这里可以做一个总结就是，带了volatile前缀的淘汰策略，会去优先寻找带有超时时间，也就是带有expire属性的键，然后具体是执行最近使用淘汰，还是最小活跃度淘汰，还是随机。
+
+而allkeys将会选择忽视超时时间参数（expire）来执行具体策略。
+
+动态改变淘汰策略
+
+```
+redis> config set maxmemory-policy volatile-lru
+```
+
+建议使用 volatile-lru，在保证正常服务的情况下，优先删除最近最少使用的 key
+
+##### LRU 淘汰原理
+
+> 如果基于传统的LRU算法实现Redis LRU 会有什么问题？
+
+需要额外的数据结构存储，消耗内存。
+
+Redis LRU 对传统的 LRU 算法进行了改良，通过随机采样来调整算法的精度。
+
+如果淘汰策略是LRU，则根据配置的采样值 `maxmemory-samples`(默认是5个)
+
+```properties
+# The default of 5 produces good enough results. 10 Approximates very closely
+# true LRU but costs more CPU. 3 is faster but not very accurate.
+# redis.conf 608行
+# maxmemory-samples 5
+```
+
+随机从数据库中选择m个key，淘汰其中热度最低的key对应缓存数据。所以采样参数m配置的越大越好，越能精确地查找到待淘汰的缓存数据，但是也小号更多的CPU计算，执行效率降低。
+
+> 如何找出热度最低的数据？
+
+Redis中的所有对象结构都有一个lru字段，且使用了unsigned的低24位，这个字段用来记录对象的热度。对象被创建时会记录lru值。被访问的时候会更新lru的值。这个值的基准并没有系统当前的时间戳，而是设置为全局变量
+
+`server.lruclock`的值，以他为基准去更新lru中的值
+
+```c
+typedef struct redisObject {
+    unsigned type:4;
+    unsigned encoding:4;
+    unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
+    * LFU data (least significant 8 bits frequency
+    * and most significant 16 bits access time). */
+    int refcount;
+    void *ptr;
+} robj;
+```
+
+> server.lruclock的值怎么来的？
+
+Redis 中 有 个 定 时 处 理 的 函 数 serverCron ， 默 认 每 100 毫 秒 调 用 函 数updateCachedTime 更新一次全局变量的 server.lruclock 的值，它记录的是当前 unix时间戳。
+
+```c
+/* We take a cached value of the unix time in the global state because with
+ * virtual memory and aging there is to store the current time in objects at
+ * every object access, and accuracy is not needed. To access a global var is
+ * a lot faster than calling time(NULL) 
+ server.c 1058 line
+ */
+void updateCachedTime(void) {
+    time_t unixtime = time(NULL);
+    atomicSet(server.unixtime,unixtime);
+    server.mstime = mstime();
+
+    /* To get information about daylight saving time, we need to call localtime_r
+     * and cache the result. However calling localtime_r in this context is safe
+     * since we will never fork() while here, in the main thread. The logging
+     * function will call a thread safe version of localtime that has no locks. */
+    struct tm tm;
+    localtime_r(&server.unixtime,&tm);
+    server.daylight_active = tm.tm_isdst;
+}
+```
+
+> 为什么不获取精确的时间而是放在全局变量中？不会有延迟的问题吗？
+
+这样函数 lookupKey 中更新数据的 lru 热度值时,就不用每次调用系统函数 time，可以提高执行效率。OK，当对象里面已经有了 LRU 字段的值，就可以评估对象的热度了。函数 estimateObjectIdleTime 评估指定对象的 lru 热度，思想就是对象的 lru 值和全局的 server.lruclock 的差值越大（越久没有得到更新）， 该对象热度越低。
+
+```c
+/* Given an object returns the min number of milliseconds the object was never
+ * requested, using an approximated LRU algorithm.
+ evict.c 90 line
+ */
+unsigned long long estimateObjectIdleTime(robj *o) {
+    unsigned long long lruclock = LRU_CLOCK();
+    if (lruclock >= o->lru) {
+        return (lruclock - o->lru) * LRU_CLOCK_RESOLUTION;
+    } else {
+        return (lruclock + (LRU_CLOCK_MAX - o->lru)) *
+                    LRU_CLOCK_RESOLUTION;
+    }
+}
+```
+
+server.lruclock 只有 24 位，按秒为单位来表示才能存储 194 天。当超过 24bit 能表示的最大时间的时候，它会从头开始计算。
+
+```properties
+# server.h
+#define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of 
+```
+
+在这种情况下，可能会出现对象的 lru 大于 server.lruclock 的情况，如果这种情况
+**出现那么就两个相加而不是相减来求最久的 key。**
+
+为什么不用常规的哈希表+双向链表的方式实现？需要额外的数据结构，消耗资源。而 Redis LRU 算法在 sample 为 10 的情况下，已经能接近传统 LRU 算法了。
+
+> 除了消耗资源之外，传统 LRU 还有什么问题？
+
+如图，假设 A 在 10 秒内被访问了 5 次，而 B 在 10 秒内被访问了 3 次。因为 B 最后一次被访问的时间比 A 要晚，在同等的情况下，A 反而先被回收。
+
+![1573572660129](C:\Users\99405\AppData\Roaming\Typora\typora-user-images\1573572660129.png)
+
+##### LFU 的淘汰原理
+
+```c
+/* server.h */
+typedef struct redisObject {
+    unsigned type:4;
+    unsigned encoding:4;
+    unsigned lru:LRU_BITS; /* LRU time (relative to global lru_clock) or
+                            * LFU data (least significant 8 bits frequency
+                            * and most significant 16 bits access time). */
+    int refcount;
+    void *ptr;
+} robj;
+```
+
+当这 24 bits 用作 LFU 时，其被分为两部分：
+
+* 高 16 位用来记录访问时间（单位为分钟，ldt，last decrement time）
+* 低 8 位用来记录访问频率，简称 counter（logc，logistic counter）
+
+counter 是用基于概率的对数计数器实现的，8 位可以表示百万次的访问频率。对象被读写的时候，lfu 的值会被更新。
+
+```c
+/* Update LFU when an object is accessed.
+ * Firstly, decrement the counter if the decrement time is reached.
+ * Then logarithmically increment the counter, and update the access time. 
+ db.c 46 line
+ */
+void updateLFU(robj *val) {
+    unsigned long counter = LFUDecrAndReturn(val);
+    counter = LFULogIncr(counter);
+    val->lru = (LFUGetTimeInMinutes()<<8) | counter;
+}
+```
+
+增长的速率由，lfu-log-factor 越大，counter 增长的越慢
+
+```properties
+# lfu-log-factor 10
+```
+
+如果计数器只会递增不会递减，也不能体现对象的热度。没有被访问的时候，计数器怎么递减呢？减少的值由衰减因子 lfu-decay-time（分钟）来控制，如果值是 1 的话，N 分钟没有访问就要减少 N。
+
+```c
+# lfu-decay-time 1
+```
+
