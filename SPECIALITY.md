@@ -719,3 +719,219 @@ rdbchecksum yes
 | rdbcompression | 开启压缩可以节省存储空间，但是会消耗一些 CPU 的计算时间，默认开启 |
 | rdbchecksum    | 使用 CRC64 算法来进行数据校验，但是这样做会增加大约 10%的性能消耗，如果希望获取到最 |
 
+> 为什么停止 Redis 服务的时候没有 save，重启数据还在？
+
+RDB还有两种触发方式：
+
+* shutdown 触发，保证服务器正常关闭
+* flushall，RDB 文件是空的，没有什么意义
+
+###### 手动触发
+
+如果我们需要重启服务或者迁移数据，这个时候就需要手动触发RDB快照保存。Redis提供了两条命令
+
+> save
+
+save在生成快照的时候会阻塞当前Redis服务器，Redis不能处理其他命令。如果内存中的数据比较多，会造成Redis长时间阻塞。生产环境不建议使用这个命令。
+
+为了解决这个问题，Redis提供了第二种方式。
+
+> bgsave
+
+执行bgsave 时，Redis会在后台异步进行快照操作，快照同时还可以响应客户端请求，具体操作是Redis进程执行fork操作，创建子进程（copy-on-write），RDB持久化过程由子进程负责，完成后自动结束。它不会记录fork之后后续的命令。阻塞只发生在fork阶段，一般时间很短。
+
+用lastsave命名可以查看最近一次成功生成快照的时间。
+
+> RDB 数据的恢复（演示）
+
+shutdown持久化
+
+我们首先往redis里面添加一些值
+
+![1573649926063](./img/1573649926063.png)
+
+由于我最一开始执行了f`flushall`的命名，然后添加的数据，我们可以看到目前来说，这个库是没有rdb文件的。
+
+![1573650188475](./img/1573650188475.png)
+
+接着，我使用`shutdown`，主动触发save
+
+![1573650261662](./img/1573650261662.png)
+
+> 关于 dump.rdb生成的位置
+
+我一直以为会直接生成在于 `redis.conf`同目录的位置，其实不对的，我们看下`redis.conf`里面的配置
+
+```properties
+# The filename where to dump the DB
+# 这个是具体的文件名
+dbfilename dump.rdb
+
+# The working directory.
+#
+# The DB will be written inside this directory, with the filename specified
+# above using the 'dbfilename' configuration directive.
+#
+# The Append Only File will also be created inside this directory.
+#
+# Note that you must specify a directory here, not a file name.
+# 这个是存放的路径，注意一点的是这个./生成的是 启动redis-server的目录下
+dir ./
+```
+
+如果我们按照上面的命名去查找，会发现文件并不是生成在同redis.conf文件目录下。而是在src里面，也就是和redis-server同级别的目录下。
+
+```
+find / -name dump.rdb
+```
+
+![1573651664290](./img/1573651664290.png)
+
+这个时候，我们只需要更改配置，将保存目录上移一层就可以了。
+
+```properties
+dir ../
+```
+
+然后我们就看到生成在我们熟悉的位置。
+
+![1573651766211](./img/1573651766211.png)
+
+> 继续
+
+执行`shutdown`，由于我们之前塞入了几个值，然后我们现在这个快照文件进行备份。
+
+```
+cp dump.rdb dump.rdb.bak
+```
+
+接着我们再次启动服务器，可以看到数据还是存在的，
+
+![1573652037943](./img/1573652037943.png)
+
+现在模拟一个文件丢失，假设我们不小心执行了`flushall`导致库里面的数据，并且停止了服务器
+
+![1573652177975](./img/1573652177975.png)
+
+这个时候，已经没有了数据。
+
+我们通过将文件重新拷贝回来，来实现恢复数据。
+
+```
+mv dump.rdb.bak dump.rdb
+```
+
+再次启动
+
+![1573652322901](./img/1573652322901.png)
+
+数据又回来了。
+
+> RDB 文件的优势和劣势
+
+1. 优势
+   1. RDB 是一个非常紧凑(compact)的文件，他保存了redis在某个时间点上的数据集。这个文件非常适合用于进行备份和灾难恢复。
+   2. 生成RDB文件的时候，redis主进程会fork()一个子进程来处理所有的保存工作，主进程不需要进行任何磁盘IO操作。
+   3. RDB在恢复大数据集的速度比AOF的恢复速度要快
+2. 劣势
+   1. RDB方式数据没办法实施持久化/秒级持久化。因为他只能保存执行shutdown，flushall自动触发，和save，bgsave等被动触发之前的命名集。后面如果还有追加到操作集，那么无法保存下来。而且bgsave每次运行都要执行fork操作创建子进程，频繁执行成本过高。
+   2. 在一定间隔时间做一次备份，如果redis意外挂掉，就会丢失最后一次快照之后的所有修改，数据会丢失。
+
+如果数据相对来说比较重要，希望将损失降到最小，则可以使用AOF方式进行持久化
+
+##### AOF
+
+Append Only File
+
+> AOF 
+
+Redis 默认不开启，AOF采用日志的形式来记录每个**写操作**，并追加到文件中。开启后，执行更改Redis数据的命名时，就会把命令写到AOF文件中。
+
+Redis重启时会根据日志文件的内容，把写执行从前到后执行一次以完成数据的恢复工作。
+
+> AOF 配置
+
+```properties
+# 开关，默认关闭 redis.conf
+appendonly no
+
+# The name of the append only file (default: "appendonly.aof")
+# 文件名
+appendfilename "appendonly.aof"
+```
+
+| 参数                            | 说明                                                 |
+| ------------------------------- | ---------------------------------------------------- |
+| appendonly                      | Redis 默认只开启 RDB 持久化，开启 AOF 需要修改为 yes |
+| appendfilename "appendonly.aof" | 路径也是通过 dir 参数配置 config get dir             |
+
+> 数据都是实时持久化到磁盘吗
+
+由于操作系统的缓存机制，AOF 数据并没有真正地写入硬盘，而是进入了系统的硬盘缓存。什么时候把缓冲区的内容写入到 AOF 文件？
+
+| 参数                 | 说明                                                         |
+| -------------------- | ------------------------------------------------------------ |
+| appendfsync everysec | AOF 持久化策略（硬盘缓存到磁盘），默认 everysec<br/> no 表示不执行 fsync，由操作系统保证数据同步到磁盘，速度最快，但是不太安全；
+ always 表示每次写入都执行 fsync，以保证数据同步到磁盘，效率很低；
+ everysec 表示每秒执行一次 fsync，可能会导致丢失这 1s 数据。通常选择 everysec ，
+兼顾安全性和效率。 |
+
+```properties
+# redis.conf
+# appendfsync always
+appendfsync everysec
+# appendfsync no
+```
+
+> 文件越来越大，怎么办？
+
+由于 AOF 持久化是 Redis 不断将写命令记录到 AOF 文件中，随着 Redis 不断的进行，AOF 的文件会越来越大，文件越大，占用服务器内存越大以及 AOF 恢复要求时间越长。
+
+例如 set pop 666，执行 1000 次，结果都是 pop =666。
+
+为了解决这个问题，Redis 新增了重写机制，当 AOF 文件的大小超过所设定的阈值时，Redis 就会启动 AOF 文件的内容压缩，只保留可以恢复数据的最小指令集。
+
+可以使用命令 `bgrewriteaof` 来重写
+
+AOF 文件重写并不是对原文件进行重新整理，而是直接读取服务器现有的键值对，然后用一条命令去代替之前记录这个键值对的多条命令，生成一个新的文件后去替换原来的 AOF 文件。
+
+```properties
+# redis.conf 重写触发机制
+auto-aof-rewrite-percentage 100
+auto-aof-rewrite-min-size 64mb
+```
+
+| 参数                        | 说明                                                         |
+| --------------------------- | ------------------------------------------------------------ |
+| auto-aof-rewrite-percentage | 默认值为 100。aof 自动重写配置，当目前 aof 文件大小超过上一次重写的 aof 文件大小的百分之多少进行重写，即当 aof 文件增长到一定大小的时候，Redis 能够调用 bgrewriteaof对日志文件进行重写。当前 AOF 文件大小是上次日志重写得到 AOF 文件大小的二倍（设置为 100）时，自动启动新的日志重写过程。 |
+| auto-aof-rewrite-min-size   | 默认 64M。设置允许重写的最小 aof 文件大小，避免了达到约定百分比但尺寸仍然很小的情况还要重写。 |
+
+> 重写过程中，AOF 文件被更改了怎么办？
+
+![1573653776835](./img/1573653776835.png)
+
+| 参数                      | 说明                                                         |
+| ------------------------- | ------------------------------------------------------------ |
+| no-appendfsync-on-rewrite | 在 aof 重写或者写入 rdb 文件的时候，会执行大量 IO，此时对于 everysec 和 always 的 aof<br/>模式来说，执行 fsync 会造成阻塞过长时间，no-appendfsync-on-rewrite 字段设置为默认设
+置为 no。如果对延迟要求很高的应用，这个字段可以设置为 yes，否则还是设置为 no，这
+样对持久化特性来说这是更安全的选择。设置为 yes 表示 rewrite 期间对新写操作不 fsync, 暂时存在内存中,等 rewrite 完成后再写入，默认为 no，建议修改为 yes。Linux 的默认 fsync
+策略是 30 秒。可能丢失 30 秒数据。 |
+| aof-load-truncated        | aof 文件可能在尾部是不完整的，当 redis 启动的时候，aof 文件的数据被载入内存。重启<br/>可能发生在 redis 所在的主机操作系统宕机后，尤其在 ext4 文件系统没有加上 data=ordered
+选项，出现这种现象。redis 宕机或者异常终止不会造成尾部不完整现象，可以选择让 redis
+退出，或者导入尽可能多的数据。如果选择的是 yes，当截断的 aof 文件被导入的时候，
+会自动发布一个 log 给客户端然后 load。如果是 no，用户必须手动 redis-check-aof 修复 AOF
+文件才可以。默认值为 yes。 |
+
+重启 Redis 之后就会进行 AOF 文件的恢复。
+
+> AOF 优势与劣势
+
+1. 优点
+   1. AOF 持久化方法提供了多种的同步频率，即使使用默认的同步频率每秒同步一次，Redis最多也就丢失1秒的数据而已。
+2. 缺点
+   1. 对于具有相同数据的Redis，AOF文件通常会比RDF文件体积更大（RDB存档是数据快照）。
+   2. 虽然AOF提供了多种同步的频率，默认情况下，每秒同步一次的频率也具有较高的性能。在高并发的情况下，RDB比AOF具有更好的性能保证。
+
+##### 两种持久化机制的比较
+
+那么对于 AOF 和 RDB 两种持久化方式，我们应该如何选择呢？如果可以忍受一小段时间内数据的丢失，毫无疑问使用 RDB 是最好的，定时生成RDB 快照（snapshot）非常便于进行数据库备份， 并且 RDB 恢复数据集的速度也要比 AOF 恢复的速度要快。否则就使用 AOF 重写。但是一般情况下建议不要单独使用某一种持久化机制，而是应该两种一起用，在这种情况下,当 redis 重启的时候会优先载入 AOF 文件来恢复原始的数据，因为在通常情况下 AOF 文件保存的数据集要比 RDB 文件保存的数据集要完整。
