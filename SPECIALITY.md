@@ -604,7 +604,7 @@ server.lruclock 只有 24 位，按秒为单位来表示才能存储 194 天。�
 
 如图，假设 A 在 10 秒内被访问了 5 次，而 B 在 10 秒内被访问了 3 次。因为 B 最后一次被访问的时间比 A 要晚，在同等的情况下，A 反而先被回收。
 
-![1573572660129](C:\Users\99405\AppData\Roaming\Typora\typora-user-images\1573572660129.png)
+![1573572660129](./img/1573572660129.png)
 
 ##### LFU 的淘汰原理
 
@@ -652,4 +652,70 @@ void updateLFU(robj *val) {
 ```c
 # lfu-decay-time 1
 ```
+
+-----
+
+#### 持久化机制
+
+Redis 速度快，很大一部分原因是因为它所有的数据都存储在内存中。如果断电或者 宕机，都会导致内存中的数据丢失。为了实现重启后数据不丢失，Redis 提供了两种持久 化的方案，一种是 RDB 快照（Redis DataBase），一种是 AOF（Append Only File）。
+
+##### RDB
+
+RDB 是 Redis 默认的持久化方案。当满足一定条件的时候，会把当前内存中数据写入磁盘，生成一个快照文件`dump.rdb`。Redis重启后会通过加载`dump.rdb`文件恢复数据。
+
+什么时候写入rdb文件。
+
+**RDB 触发**
+
+> 自动触发
+
+配置规则触发，redis.conf，SNAPSHOTTING，其中定义了触发把数据保存到磁盘的触发频率。 如果不需要 RDB 方案，注释 save 或者配置成空字符串""。
+
+```properties
+################################ SNAPSHOTTING  ################################
+#
+# Save the DB on disk:
+#
+#   save <seconds> <changes>
+#
+#   Will save the DB if both the given number of seconds and the given
+#   number of write operations against the DB occurred.
+#
+#   In the example below the behaviour will be to save:
+#   after 900 sec (15 min) if at least 1 key changed
+#   after 300 sec (5 min) if at least 10 keys changed
+#   after 60 sec if at least 10000 keys changed
+#
+#   Note: you can disable saving completely by commenting out all "save" lines.
+#
+#   It is also possible to remove all the previously configured save
+#   points by adding a save directive with a single empty string argument
+#   like in the following example:
+#
+#   save ""
+
+save 900 1 # 900 秒内至少有一个 key 被修改（包括添加） 
+save 300 10 # 400 秒内至少有 10 个 key 被修改 
+save 60 10000 # 60 秒内至少有 10000 个 key 被修改
+```
+
+注意上面的配置是不冲突的，只要满足任意一个条件都会触发。
+
+```properties
+# 文件路径， 
+dir ./ 
+# 文件名称 
+dbfilename dump.rdb 
+# 是否是 LZF 压缩 rdb 文件 
+rdbcompression yes 
+# 开启数据校验 
+rdbchecksum yes
+```
+
+| 参数           | 说明                                                         |
+| -------------- | ------------------------------------------------------------ |
+| dir            | rdb 文件默认在启动目录下（相对路径），config get dir 获取    |
+| dbfilename     | 文件名称                                                     |
+| rdbcompression | 开启压缩可以节省存储空间，但是会消耗一些 CPU 的计算时间，默认开启 |
+| rdbchecksum    | 使用 CRC64 算法来进行数据校验，但是这样做会增加大约 10%的性能消耗，如果希望获取到最 |
 
