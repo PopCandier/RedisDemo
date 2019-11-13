@@ -334,6 +334,54 @@ script load '命令'
 127.0.0.1:6379> set num 2 OK 127.0.0.1:6379> evalsha be4f93d8a5379e5e5b768a74e77c8a4eb0434441 1 num 6 (integer) 12
 ```
 
+##### 脚本超时
+
+Redis 的指令执行本身是单线程的，这个线程还要执行客户端的 Lua 脚本，如果 Lua 脚本执行超时或者陷入了死循环，是不是没有办法为客户端提供服务了呢？
+
+```lua
+eval 'while(true) do end' 0
+```
+
+为 了防 止 某个 脚本 执 行时 间 过长 导 致 Redis 无 法提 供 服务 ， Redis 提 供 了 
+
+lua-time-limit 参数限制脚本的最长运行时间，默认为 5 秒钟。
+
+```properties
+lua-time-limit 5000（redis.conf 配置文件中）
+```
+
+当脚本运行时间未超过这一限制后，Redis 将开始接受其他命令但不会执行（以确保脚 
+
+本的原子性，因为此时脚本并没有被终止），而是会返回“BUSY”错误。
+
+Redis 提供了一个 script kill 的命令来中止脚本的执行。新开一个客户端： 
+
+```
+script kill
+```
+
+如果当前执行的 Lua 脚本对 Redis 的数据进行了修改（SET、DEL 等），那么通过 
+
+script kill 命令是不能终止脚本运行的。
+
+```
+127.0.0.1:6379> eval "redis.call('set','pop','666') while true do end" 0
+```
+
+因为要保证脚本运行的原子性，如果脚本执行了一部分终止，那就违背了脚本原子 
+
+性的要求。最终要保证脚本要么都执行，要么都不执行。
+
+```
+127.0.0.1:6379> script kill (error) UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the scripttermination or kill the server in a hard way using the SHUTDOWN NOSAVE command
+```
+
+遇到这种情况，只能通过 shutdown nosave 命令来强行终止 redis。 
+
+shutdown nosave 和 shutdown 的区别在于 shutdown nosave 不会进行持久化 
+
+操作，意味着发生在上一次快照后的数据库修改都会丢失。
+
 ---
 
 ##### Redis为什么这快
