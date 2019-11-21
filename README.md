@@ -71,3 +71,5 @@
 
 [Redis的一些高级特性](./SPECIALITY.md)
 
+[Redis的分布式](./DISTRIBUTED.md)
+
