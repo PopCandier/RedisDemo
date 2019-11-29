@@ -210,3 +210,11 @@ Sentinel 的 Raft 算法和 Raft 论文略有不同。
 
 #### Sentinel 实战
 
+由于Sentinel也可能存在高可用的问题，所以Sentinel也需要做集群部署，集群中至少需要三个Sentinel实例，保证是奇数。
+
+| hostname | IP地址    | 节点角色&端口              |
+| -------- | --------- | -------------------------- |
+| master   | 127.0.0.1 | Master:6379/Sentinel:26379 |
+| slave1   | 127.0.0.1 | Slave:6380/Sentinel:26380  |
+| slave1   | 127.0.0.1 | Slave:6381/Sentinel:26381  |
+
