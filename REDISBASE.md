@@ -101,7 +101,13 @@ redis可视化工具
 链接: https://pan.baidu.com/s/1GOkRg1JSbJYTP_6JPhAYtQ 提取码: ge7m 
 ```
 
+如果你希望给redis增加密码，可以在redis.conf中添加，后面跟着是密码
 
+```
+requirepass 123
+```
+
+![1575345958439](./img/1575345958439.png)
 
 #### 基本操作
 
